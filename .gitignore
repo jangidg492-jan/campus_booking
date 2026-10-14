@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+*.pyc
+campus_booking.db
+.DS_Store
+.agents/
