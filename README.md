@@ -1,37 +1,52 @@
-# Smart Campus Resource & Room Booking System
+# Smart Campus Resource and Room Booking System
 
-Ek lightweight, self-contained desktop web application jo campus ke rooms aur gear booking ko streamline karta hai, schedule conflicts aur double-booking actively rokta hai.
+A local Streamlit application for browsing campus rooms and equipment, submitting
+reservations, preventing approved-slot conflicts, and managing administrator
+approvals.
 
----
+## Features
 
-## 📌 Project Overview
-Campus mein study rooms, auditoriums aur lab gear book karte waqt aksar double-booking aur schedule clashes hote hain. Yeh system auto-conflict detection logic provide karta hai jisse:
-- Duplicate reservations block hoti hain.
-- Students/Faculty resources easily browse aur book kar sakte hain.
-- Administrators requests ko review, approve ya reject kar sakte hain.
+- Register and sign in with a student, professor, or researcher account.
+- Passwords are stored as salted PBKDF2 hashes, never as plaintext.
+- Users can create, view, edit, and delete their own pending bookings. Approved
+  bookings can be cancelled.
+- Administrators can approve or reject bookings and create, edit, and delete
+  resources. Resource deletion is blocked while booking history references it.
+- Booking and resource data is stored in the local `campus_booking.db` SQLite
+  database. Existing booking databases are migrated on startup.
+- Set `CAMPUS_BOOKING_DB` to use a different SQLite file; by default the database
+  is created next to `app.py`.
 
----
+## Setup
 
-## 🚀 Key Features
-- **Resource Directory:** Rooms (jaise Seminar Hall) aur gear (jaise GPU servers) ki capacity, specs aur rules ka clear catalog.
-- **Conflict Prevention Engine:** Real-time checking system jo identical time-slot par multiple bookings ko block karta hai.
-- **Approval Workflow:** Admin dashboard jahan pending requests ko accept/reject kiya ja sake with custom notes.
-- **Personal Dashboard:** Students apne past aur upcoming reservations ka status dekh sakte hain aur cancel kar sakte hain.
-- **Zero Cloud Dependency:** Data securely local SQLite database mein store hota hai bina kisi external cloud service ke.
+Requires Python 3.10 or newer. The startup scripts create a virtual environment,
+install requirements, and launch Streamlit:
 
----
-
-## 🛠️ Tech Stack
-- **Language:** Python 3.10+
-- **Frontend / UI:** Streamlit[cite: 1]
-- **Database:** SQLite3 (Local file-based storage)[cite: 1]
-
----
-
-## ⚙️ Installation & Local Setup
-
-### Prerequisites
-Make sure Python 3.10 ya usse higher version installed ho:
 ```bash
-python3 --version
-# campus_booking
+./run.sh
+```
+
+Windows:
+
+```bat
+run.bat
+```
+
+## First administrator
+
+Regular accounts can be registered from the app. Administrator accounts cannot
+be self-registered. Edit the local `.env` file and set the administrator
+credentials before the first launch. See `.env.example` for the variable names:
+
+```bash
+# Edit .env and set CAMPUS_ADMIN_EMAIL and CAMPUS_ADMIN_PASSWORD.
+./run.sh
+```
+
+You can also provide these as environment variables; environment variables take
+precedence over values in `.env`. The real `.env` file is ignored by Git. Keep
+your credentials private and use a unique password of at least 12 characters.
+The configured email is created as an administrator on first startup; if a
+regular account with that email already exists, it is promoted during
+provisioning. Changing the environment variables later does not reset an
+existing administrator password.

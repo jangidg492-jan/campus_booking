@@ -1,266 +1,477 @@
+from datetime import date, datetime, time
+
 import streamlit as st
-import sqlite3
-from datetime import datetime, date, time
 
-DB_NAME = "campus_booking.db"
+from database import (
+    approve_booking,
+    authenticate_user,
+    create_booking,
+    database,
+    delete_own_booking,
+    init_db,
+    register_user,
+    update_booking,
+)
 
-# ----------------- DATABASE SETUP -----------------
-def get_connection():
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    return conn
 
-def init_db():
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    # Table for rooms and gear
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS resources (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            type TEXT NOT NULL,
-            capacity INTEGER,
-            specs TEXT,
-            guidelines TEXT
-        )
-    """)
-    
-    # Table for booking requests
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS bookings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            resource_id INTEGER,
-            user_name TEXT,
-            user_role TEXT,
-            booking_date TEXT,
-            start_time TEXT,
-            end_time TEXT,
-            status TEXT DEFAULT 'PENDING',
-            admin_notes TEXT DEFAULT '',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (resource_id) REFERENCES resources(id)
-        )
-    """)
-    
-    # Seed default resources if empty
-    cursor.execute("SELECT COUNT(*) FROM resources")
-    if cursor.fetchone()[0] == 0:
-        sample_resources = [
-            ("Seminar Hall A", "Room", 120, "Projector, Surround Audio, AC", "Keep noise moderate after 7 PM."),
-            ("Conference Room 2", "Room", 15, "Smart Display, Polycom, Whiteboard", "Clean whiteboard after use."),
-            ("GPU Workstation Cluster", "Hardware", 1, "4x NVIDIA RTX 4090, 128GB RAM", "Do not interrupt long compute tasks."),
-            ("IoT Lab Hardware Kit 1", "Hardware", 4, "Raspberry Pi 4, Arduino, Sensor pack", "Return all component bags intact.")
-        ]
-        cursor.executemany(
-            "INSERT INTO resources (name, type, capacity, specs, guidelines) VALUES (?, ?, ?, ?, ?)",
-            sample_resources
-        )
-    
-    conn.commit()
-    conn.close()
-
-# ----------------- CORE LOGIC -----------------
-def check_overlap(resource_id, b_date, start_str, end_str):
-    """
-    Checks if a requested slot overlaps with an APPROVED booking.
-    Overlap condition: (StartA < EndB) and (EndA > StartB)
-    """
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT * FROM bookings 
-        WHERE resource_id = ? 
-          AND booking_date = ? 
-          AND status = 'APPROVED'
-          AND (start_time < ? AND end_time > ?)
-    """, (resource_id, b_date, end_str, start_str))
-    conflict = cursor.fetchone()
-    conn.close()
-    return conflict is not None
-
-# ----------------- UI SETUP -----------------
 st.set_page_config(page_title="Smart Campus Resource Booking", layout="wide")
 init_db()
 
-# Top Sidebar Role Switcher
-st.sidebar.title("Campus Portal")
-role = st.sidebar.radio("Select Persona", ["Student / Faculty", "Campus Administrator"])
 
-# ----------------- VIEW 1: STUDENT / FACULTY -----------------
-if role == "Student / Faculty":
-    st.title("Smart Campus Resource & Room Booking")
-    tab1, tab2, tab3 = st.tabs(["Directory & Book Resource", "My Booking Dashboard", "Availability View"])
+def show_authentication():
+    st.title("Campus portal")
+    st.caption("Sign in or create a student, professor, or researcher account.")
+    login_tab, register_tab = st.tabs(["Log in", "Register"])
 
-    with tab1:
-        st.subheader("Bookable Spaces & Hardware")
-        conn = get_connection()
-        resources = conn.execute("SELECT * FROM resources").fetchall()
-        conn.close()
-
-        # Display Directory
-        for res in resources:
-            with st.expander(f"{res['name']} ({res['type']}) - Capacity: {res['capacity']}"):
-                st.write(f"**Specs:** {res['specs']}")
-                st.write(f"**Guidelines:** {res['guidelines']}")
-
-        st.markdown("---")
-        st.subheader("Submit a Reservation Request")
-        
-        with st.form("booking_form"):
-            col1, col2 = st.columns(2)
-            with col1:
-                user_name = st.text_input("Your Full Name")
-                user_role = st.selectbox("Role", ["Student", "Professor", "Researcher"])
-                resource_options = {res['name']: res['id'] for res in resources}
-                selected_res_name = st.selectbox("Select Resource", list(resource_options.keys()))
-            
-            with col2:
-                booking_date = st.date_input("Booking Date", min_value=date.today())
-                start_val = st.time_input("Start Time", time(9, 0))
-                end_val = st.time_input("End Time", time(10, 0))
-            
-            submitted = st.form_submit_button("Submit Request")
-            
-            if submitted:
-                if not user_name.strip():
-                    st.error("Please enter your name.")
-                elif start_val >= end_val:
-                    st.error("End time must be after start time.")
-                else:
-                    res_id = resource_options[selected_res_name]
-                    start_str = start_val.strftime("%H:%M")
-                    end_str = end_val.strftime("%H:%M")
-                    date_str = booking_date.strftime("%Y-%m-%d")
-
-                    # Check collision
-                    if check_overlap(res_id, date_str, start_str, end_str):
-                        st.error("Conflict detected: That slot is already booked and approved for this resource.")
-                    else:
-                        conn = get_connection()
-                        conn.execute("""
-                            INSERT INTO bookings (resource_id, user_name, user_role, booking_date, start_time, end_time, status)
-                            VALUES (?, ?, ?, ?, ?, ?, 'PENDING')
-                        """, (res_id, user_name, user_role, date_str, start_str, end_str))
-                        conn.commit()
-                        conn.close()
-                        st.success("Request submitted successfully! Waiting for administrator approval.")
-
-    with tab2:
-        st.subheader("Track Your Bookings")
-        search_user = st.text_input("Filter by your Name:")
-        if search_user:
-            conn = get_connection()
-            user_bookings = conn.execute("""
-                SELECT b.id, r.name as resource_name, b.booking_date, b.start_time, b.end_time, b.status, b.admin_notes
-                FROM bookings b
-                JOIN resources r ON b.resource_id = r.id
-                WHERE b.user_name LIKE ?
-                ORDER BY b.booking_date DESC
-            """, (f"%{search_user}%",)).fetchall()
-            conn.close()
-
-            if user_bookings:
-                for b in user_bookings:
-                    badge_color = "orange" if b['status'] == "PENDING" else ("green" if b['status'] == "APPROVED" else "red")
-                    st.markdown(f"**Booking ID #{b['id']}** | **{b['resource_name']}** | Date: `{b['booking_date']}` | Slot: `{b['start_time']} - {b['end_time']}`")
-                    st.markdown(f"Status: :{badge_color}[{b['status']}]")
-                    if b['admin_notes']:
-                        st.caption(f"Admin Note: {b['admin_notes']}")
-                    
-                    if b['status'] in ['PENDING', 'APPROVED']:
-                        if st.button(f"Cancel Request #{b['id']}", key=f"cancel_{b['id']}"):
-                            conn = get_connection()
-                            conn.execute("UPDATE bookings SET status = 'CANCELLED' WHERE id = ?", (b['id'],))
-                            conn.commit()
-                            conn.close()
-                            st.rerun()
-                    st.markdown("---")
+    with login_tab:
+        with st.form("login_form"):
+            email = st.text_input("Email address", key="login_email")
+            password = st.text_input("Password", type="password", key="login_password")
+            submitted = st.form_submit_button("Log in", type="primary")
+        if submitted:
+            user = authenticate_user(email, password)
+            if user is None:
+                st.error("Invalid email or password.")
             else:
-                st.info("No bookings found under this name.")
+                st.session_state["user"] = user
+                st.rerun()
 
-    with tab3:
-        st.subheader("Current Approved Reservations")
-        filter_date = st.date_input("View Bookings for Date", date.today(), key="view_date")
-        conn = get_connection()
-        approved = conn.execute("""
-            SELECT r.name, b.start_time, b.end_time, b.user_role
-            FROM bookings b
-            JOIN resources r ON b.resource_id = r.id
-            WHERE b.booking_date = ? AND b.status = 'APPROVED'
-            ORDER BY b.start_time ASC
-        """, (filter_date.strftime("%Y-%m-%d"),)).fetchall()
-        conn.close()
+    with register_tab:
+        with st.form("register_form"):
+            name = st.text_input("Full name", key="register_name")
+            email = st.text_input("Email address", key="register_email")
+            user_role = st.selectbox(
+                "Campus role", ["Student", "Professor", "Researcher"]
+            )
+            password = st.text_input(
+                "Password (at least 12 characters)",
+                type="password",
+                key="register_password",
+            )
+            confirm_password = st.text_input(
+                "Confirm password", type="password", key="register_confirm_password"
+            )
+            submitted = st.form_submit_button("Create account", type="primary")
+        if submitted:
+            if password != confirm_password:
+                st.error("The passwords do not match.")
+            else:
+                try:
+                    st.session_state["user"] = register_user(
+                        name, email, user_role, password
+                    )
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    st.success("Account created. You are now signed in.")
+                    st.rerun()
 
+
+if "user" not in st.session_state:
+    show_authentication()
+    st.stop()
+
+current_user = st.session_state["user"]
+is_admin = current_user["role"] == "ADMIN"
+
+with st.sidebar:
+    st.title("Campus portal")
+    st.write(f"**{current_user['name']}**")
+    st.caption(
+        "Administrator" if is_admin else f"{current_user['user_role']} account"
+    )
+    if st.button("Log out"):
+        del st.session_state["user"]
+        st.rerun()
+
+
+def load_resources():
+    with database() as conn:
+        return conn.execute("SELECT * FROM resources ORDER BY name").fetchall()
+
+
+def validate_slot(start_val, end_val):
+    if start_val >= end_val:
+        st.error("End time must be after start time.")
+        return False
+    return True
+
+
+def render_booking_form(resources, user, *, existing=None, key_prefix="new"):
+    resource_options = {row["name"]: row["id"] for row in resources}
+    if not resource_options:
+        st.info("There are no bookable resources yet.")
+        return
+
+    resource_names = list(resource_options)
+    if existing:
+        current_resource = next(
+            (
+                name
+                for name, resource_id in resource_options.items()
+                if resource_id == existing["resource_id"]
+            ),
+            resource_names[0],
+        )
+        default_date = date.fromisoformat(existing["booking_date"])
+        default_start = datetime.strptime(existing["start_time"], "%H:%M").time()
+        default_end = datetime.strptime(existing["end_time"], "%H:%M").time()
+    else:
+        current_resource = resource_names[0]
+        default_date = date.today()
+        default_start = time(9, 0)
+        default_end = time(10, 0)
+
+    if default_date < date.today():
+        st.info("Past bookings cannot be edited.")
+        return
+
+    with st.form(f"{key_prefix}_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            selected_name = st.selectbox(
+                "Resource",
+                resource_names,
+                index=resource_names.index(current_resource),
+                key=f"{key_prefix}_resource",
+            )
+            booking_date = st.date_input(
+                "Booking date",
+                value=default_date,
+                min_value=date.today(),
+                key=f"{key_prefix}_date",
+            )
+        with col2:
+            start_val = st.time_input(
+                "Start time", value=default_start, key=f"{key_prefix}_start"
+            )
+            end_val = st.time_input(
+                "End time", value=default_end, key=f"{key_prefix}_end"
+            )
+        submitted = st.form_submit_button(
+            "Update booking" if existing else "Submit request",
+            type="primary",
+        )
+
+    if submitted and validate_slot(start_val, end_val):
+        values = (
+            resource_options[selected_name],
+            booking_date.strftime("%Y-%m-%d"),
+            start_val.strftime("%H:%M"),
+            end_val.strftime("%H:%M"),
+        )
+        try:
+            if existing:
+                update_booking(user["id"], existing["id"], *values)
+                st.success("Booking updated.")
+            else:
+                create_booking(user, *values)
+                st.success("Request submitted and is waiting for administrator approval.")
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            st.rerun()
+
+
+if not is_admin:
+    st.title("Smart campus resource and room booking")
+    directory_tab, bookings_tab, availability_tab = st.tabs(
+        ["Resources and booking", "My bookings", "Availability"]
+    )
+    resources = load_resources()
+
+    with directory_tab:
+        st.subheader("Bookable spaces and equipment")
+        for resource in resources:
+            with st.expander(
+                f"{resource['name']} ({resource['type']}) · Capacity: {resource['capacity'] or 'Not specified'}"
+            ):
+                st.write(f"**Specs:** {resource['specs'] or 'Not specified'}")
+                st.write(f"**Guidelines:** {resource['guidelines'] or 'None'}")
+
+        st.divider()
+        st.subheader("Submit a reservation request")
+        render_booking_form(resources, current_user)
+
+    with bookings_tab:
+        st.subheader("Your reservation requests")
+        with database() as conn:
+            user_bookings = conn.execute(
+                """
+                SELECT b.id, b.resource_id, r.name AS resource_name, b.booking_date,
+                       b.start_time, b.end_time, b.status, b.admin_notes
+                FROM bookings b
+                JOIN resources r ON r.id = b.resource_id
+                WHERE b.user_id = ?
+                ORDER BY b.booking_date DESC, b.start_time
+                """,
+                (current_user["id"],),
+            ).fetchall()
+
+        if not user_bookings:
+            st.info("You have not submitted any booking requests.")
+        for booking in user_bookings:
+            with st.expander(
+                f"#{booking['id']} · {booking['resource_name']} · {booking['booking_date']} · "
+                f"{booking['start_time']}–{booking['end_time']} · {booking['status']}"
+            ):
+                if booking["admin_notes"]:
+                    st.caption(f"Administrator note: {booking['admin_notes']}")
+                if booking["status"] == "PENDING":
+                    render_booking_form(
+                        resources,
+                        current_user,
+                        existing=booking,
+                        key_prefix=f"edit_{booking['id']}",
+                    )
+                    if st.button(
+                        "Delete pending booking",
+                        key=f"delete_booking_{booking['id']}",
+                        type="secondary",
+                    ):
+                        try:
+                            delete_own_booking(current_user["id"], booking["id"])
+                        except ValueError as exc:
+                            st.error(str(exc))
+                        else:
+                            st.rerun()
+                elif booking["status"] == "APPROVED":
+                    if st.button(
+                        "Cancel approved booking",
+                        key=f"cancel_booking_{booking['id']}",
+                    ):
+                        with database() as conn:
+                            conn.execute(
+                                """
+                                UPDATE bookings SET status = 'CANCELLED'
+                                WHERE id = ? AND user_id = ? AND status = 'APPROVED'
+                                """,
+                                (booking["id"], current_user["id"]),
+                            )
+                        st.rerun()
+
+    with availability_tab:
+        st.subheader("Approved reservations")
+        filter_date = st.date_input("View bookings for date", date.today())
+        with database() as conn:
+            approved = conn.execute(
+                """
+                SELECT r.name, b.start_time, b.end_time, b.user_role
+                FROM bookings b
+                JOIN resources r ON r.id = b.resource_id
+                WHERE b.booking_date = ? AND b.status = 'APPROVED'
+                ORDER BY b.start_time
+                """,
+                (filter_date.strftime("%Y-%m-%d"),),
+            ).fetchall()
         if approved:
             st.table([dict(row) for row in approved])
         else:
-            st.info("All resources are completely free for this date.")
+            st.info("All resources are available for this date.")
 
-# ----------------- VIEW 2: ADMINISTRATOR -----------------
 else:
-    st.title("Admin Approval Dashboard & Audit Logs")
-    
-    tab_admin1, tab_admin2 = st.tabs(["Pending Approvals", "Full Booking History"])
-    
-    with tab_admin1:
-        st.subheader("Pending Requests")
-        conn = get_connection()
-        pending = conn.execute("""
-            SELECT b.id, b.resource_id, r.name as resource_name, b.user_name, b.user_role, b.booking_date, b.start_time, b.end_time
-            FROM bookings b
-            JOIN resources r ON b.resource_id = r.id
-            WHERE b.status = 'PENDING'
-            ORDER BY b.created_at ASC
-        """).fetchall()
-        conn.close()
+    st.title("Administrator dashboard")
+    approvals_tab, history_tab, resources_tab = st.tabs(
+        ["Pending approvals", "Booking history", "Manage resources"]
+    )
+
+    with approvals_tab:
+        st.subheader("Pending requests")
+        with database() as conn:
+            pending = conn.execute(
+                """
+                SELECT b.id, b.resource_id, r.name AS resource_name, b.user_name,
+                       b.user_role, b.booking_date, b.start_time, b.end_time
+                FROM bookings b
+                JOIN resources r ON r.id = b.resource_id
+                WHERE b.status = 'PENDING'
+                ORDER BY b.created_at
+                """
+            ).fetchall()
 
         if not pending:
             st.success("No pending booking requests.")
-        else:
-            for item in pending:
-                with st.container(border=True):
-                    col_info, col_actions = st.columns([2, 1])
-                    with col_info:
-                        st.markdown(f"### {item['resource_name']}")
-                        st.write(f"**Requested By:** {item['user_name']} ({item['user_role']})")
-                        st.write(f"**Date:** {item['booking_date']} | **Time:** {item['start_time']} - {item['end_time']}")
-                    
-                    with col_actions:
-                        note = st.text_input("Admin Comment", key=f"note_{item['id']}")
-                        
-                        btn_col1, btn_col2 = st.columns(2)
-                        with btn_col1:
-                            if st.button("Approve", key=f"app_{item['id']}"):
-                                # Final double-booking sanity check
-                                if check_overlap(item['resource_id'], item['booking_date'], item['start_time'], item['end_time']):
-                                    st.error("Cannot approve: A previously approved booking now clashes with this slot!")
-                                else:
-                                    conn = get_connection()
-                                    conn.execute("UPDATE bookings SET status = 'APPROVED', admin_notes = ? WHERE id = ?", (note, item['id']))
-                                    conn.commit()
-                                    conn.close()
-                                    st.rerun()
-                        with btn_col2:
-                            if st.button("Reject", key=f"rej_{item['id']}"):
-                                conn = get_connection()
-                                conn.execute("UPDATE bookings SET status = 'REJECTED', admin_notes = ? WHERE id = ?", (note, item['id']))
-                                conn.commit()
-                                conn.close()
+        for item in pending:
+            with st.container(border=True):
+                col_info, col_actions = st.columns([2, 1])
+                with col_info:
+                    st.markdown(f"### {item['resource_name']}")
+                    st.write(f"**Requested by:** {item['user_name']} ({item['user_role']})")
+                    st.write(
+                        f"**Date:** {item['booking_date']} · **Time:** "
+                        f"{item['start_time']}–{item['end_time']}"
+                    )
+                with col_actions:
+                    note = st.text_input("Administrator note", key=f"note_{item['id']}")
+                    approve_col, reject_col = st.columns(2)
+                    with approve_col:
+                        if st.button("Approve", key=f"approve_{item['id']}"):
+                            try:
+                                approve_booking(item["id"], note)
+                            except ValueError as exc:
+                                st.error(str(exc))
+                            else:
                                 st.rerun()
+                    with reject_col:
+                        if st.button("Reject", key=f"reject_{item['id']}"):
+                            with database() as conn:
+                                conn.execute(
+                                    """
+                                    UPDATE bookings
+                                    SET status = 'REJECTED', admin_notes = ?
+                                    WHERE id = ? AND status = 'PENDING'
+                                    """,
+                                    (note, item["id"]),
+                                )
+                            st.rerun()
 
-    with tab_admin2:
-        st.subheader("System Booking Audit Log")
-        conn = get_connection()
-        logs = conn.execute("""
-            SELECT b.id, r.name as resource_name, b.user_name, b.booking_date, b.start_time, b.end_time, b.status, b.admin_notes
-            FROM bookings b
-            JOIN resources r ON b.resource_id = r.id
-            ORDER BY b.id DESC
-        """).fetchall()
-        conn.close()
-        
-        if logs:
-            st.dataframe([dict(l) for l in logs], width="stretch")
-        else:
-            st.info("No logs registered.")
+    with history_tab:
+        st.subheader("Booking history")
+        with database() as conn:
+            logs = conn.execute(
+                """
+                SELECT b.id, r.name AS resource_name, b.user_name, b.user_role,
+                       b.booking_date, b.start_time, b.end_time, b.status, b.admin_notes
+                FROM bookings b
+                JOIN resources r ON r.id = b.resource_id
+                ORDER BY b.id DESC
+                """
+            ).fetchall()
+        if not logs:
+            st.info("No booking history yet.")
+        for booking in logs:
+            with st.expander(
+                f"#{booking['id']} · {booking['resource_name']} · "
+                f"{booking['user_name']} · {booking['status']}"
+            ):
+                st.write(
+                    f"{booking['booking_date']} · {booking['start_time']}–"
+                    f"{booking['end_time']} · {booking['user_role']}"
+                )
+                if booking["admin_notes"]:
+                    st.caption(f"Administrator note: {booking['admin_notes']}")
+                if st.button(
+                    "Delete booking record",
+                    key=f"admin_delete_booking_{booking['id']}",
+                ):
+                    with database() as conn:
+                        conn.execute("DELETE FROM bookings WHERE id = ?", (booking["id"],))
+                    st.rerun()
+
+    with resources_tab:
+        st.subheader("Resource catalog")
+        resources = load_resources()
+        resource_names = {row["name"]: row for row in resources}
+        selected_name = st.selectbox(
+            "Select a resource to edit or delete",
+            ["— Create a new resource —", *resource_names.keys()],
+        )
+        selected_resource = resource_names.get(selected_name)
+        resource_types = ["Room", "Hardware", "Other"]
+        if selected_resource and selected_resource["type"] not in resource_types:
+            resource_types.append(selected_resource["type"])
+        with st.form("resource_form"):
+            name = st.text_input(
+                "Resource name", value=selected_resource["name"] if selected_resource else ""
+            )
+            resource_type = st.selectbox(
+                "Type",
+                resource_types,
+                index=(
+                    resource_types.index(selected_resource["type"])
+                    if selected_resource
+                    else 0
+                ),
+            )
+            capacity = st.number_input(
+                "Capacity",
+                min_value=1,
+                value=(
+                    selected_resource["capacity"]
+                    if selected_resource and selected_resource["capacity"]
+                    else 1
+                ),
+            )
+            specs = st.text_area(
+                "Specifications",
+                value=selected_resource["specs"] or "" if selected_resource else "",
+            )
+            guidelines = st.text_area(
+                "Guidelines",
+                value=selected_resource["guidelines"] or "" if selected_resource else "",
+            )
+            submitted = st.form_submit_button(
+                "Update resource" if selected_resource else "Create resource",
+                type="primary",
+            )
+        if submitted:
+            if not name.strip():
+                st.error("Resource name is required.")
+            else:
+                with database(immediate=True) as conn:
+                    duplicate = conn.execute(
+                        """
+                        SELECT id FROM resources
+                        WHERE name = ? COLLATE NOCASE AND id != ?
+                        """,
+                        (
+                            name.strip(),
+                            selected_resource["id"] if selected_resource else -1,
+                        ),
+                    ).fetchone()
+                    if duplicate:
+                        st.error("A resource with that name already exists.")
+                    else:
+                        if selected_resource:
+                            conn.execute(
+                                """
+                                UPDATE resources
+                                SET name = ?, type = ?, capacity = ?, specs = ?, guidelines = ?
+                                WHERE id = ?
+                                """,
+                                (
+                                    name.strip(),
+                                    resource_type,
+                                    capacity,
+                                    specs.strip(),
+                                    guidelines.strip(),
+                                    selected_resource["id"],
+                                ),
+                            )
+                        else:
+                            conn.execute(
+                                """
+                                INSERT INTO resources
+                                    (name, type, capacity, specs, guidelines)
+                                VALUES (?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    name.strip(),
+                                    resource_type,
+                                    capacity,
+                                    specs.strip(),
+                                    guidelines.strip(),
+                                ),
+                            )
+                if not duplicate:
+                    st.success("Resource saved.")
+                    st.rerun()
+
+        if selected_resource and st.button(
+            "Delete resource", type="secondary", key="delete_resource"
+        ):
+            deleted = False
+            with database(immediate=True) as conn:
+                booking_count = conn.execute(
+                    "SELECT COUNT(*) FROM bookings WHERE resource_id = ?",
+                    (selected_resource["id"],),
+                ).fetchone()[0]
+                if booking_count:
+                    st.error("This resource has booking history and cannot be deleted.")
+                else:
+                    conn.execute(
+                        "DELETE FROM resources WHERE id = ?", (selected_resource["id"],)
+                    )
+                    deleted = True
+            if deleted:
+                st.rerun()

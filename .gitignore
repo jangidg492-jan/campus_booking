@@ -2,5 +2,8 @@ venv/
 __pycache__/
 *.pyc
 campus_booking.db
+.env
+.env.*
+!.env.example
 .DS_Store
 .agents/
